@@ -125,9 +125,11 @@ Claude Desktop injects the `env` block values directly into the process — this
 | `BASIC_AUTH_USERNAME` | No | — | Username for basic auth |
 | `BASIC_AUTH_PASSWORD` | No | — | Password for basic auth |
 | `MCP_MODE` | No | `stdio` | `stdio` or `http` |
-| `ENABLE_HTTP_ENDPOINT` | No | `true` | Enable HTTP health/metrics endpoints |
+| `ENABLE_HTTP_ENDPOINT` | No | `true` | Enable diagnostic HTTP routes in HTTP mode; `/mcp` remains available |
 | `MCP_SERVER_PORT` | No | `8080` | HTTP server port |
 | `MCP_SERVER_HOST` | No | `0.0.0.0` | HTTP server host |
+| `MCP_ALLOWED_HOSTS` | No | Loopback hosts | Comma-separated permitted MCP Host headers; supports `hostname:*` for any port |
+| `MCP_ALLOWED_ORIGINS` | No | Loopback HTTP origins | Comma-separated permitted Origin headers; requests without Origin are accepted |
 | `LOG_LEVEL` | No | `INFO` | Logging verbosity |
 | `REQUEST_TIMEOUT` | No | `30` | Request timeout in seconds |
 | `SCHEMA_CACHE_TTL` | No | `3600` | Schema cache TTL in seconds |
@@ -150,13 +152,37 @@ Communicates via stdin/stdout. No HTTP server is started. This is the default.
 restapi-mcp-server --base-url https://api.example.com --spec-url https://api.example.com/openapi.json --mode http --port 8080
 ```
 
-Starts an HTTP server with health and metrics endpoints:
+Starts an MCP **Streamable HTTP** server at `http://localhost:8080/mcp`, alongside health and metrics endpoints:
+- `POST /mcp` — MCP initialization, notifications, tool listing, and tool calls
+- `GET /mcp` — optional server-to-client SSE stream for an initialized session
+- `DELETE /mcp` — terminate an MCP session
 - `GET /` — server info
 - `GET /health` — health check
 - `GET /metrics` — server metrics
 - `GET /schema` — OpenAPI schema summary
 - `GET /tools` — all generated tools
 - `GET /api/endpoints` — all API endpoints
+
+Configure your MCP client with transport `streamable-http` and URL
+`http://localhost:8080/mcp`. `/mcp/` is also accepted without redirects.
+This uses the official MCP Python SDK to negotiate the protocol version and
+manage sessions. Clients must send `Accept: application/json, text/event-stream`,
+retain the `Mcp-Session-Id` returned by initialization, and send it on subsequent
+requests together with the negotiated `MCP-Protocol-Version`.
+POST requests receive JSON responses; the legacy HTTP+SSE `/sse` transport is not provided.
+
+For access through a remote hostname or reverse proxy, configure its actual Host
+header and any browser Origin explicitly, for example:
+
+```env
+MCP_ALLOWED_HOSTS=localhost:*,127.0.0.1:*,mcp.example.com
+MCP_ALLOWED_ORIGINS=https://mcp.example.com
+```
+
+These settings validate incoming hosts and origins; they do not enable browser
+CORS or authenticate MCP clients. API authentication settings below authenticate
+outgoing requests to the REST API. For remote deployments, restrict access to the
+MCP endpoint with an authenticated HTTPS reverse proxy or a private network.
 
 ---
 
@@ -254,7 +280,7 @@ Supported spec sources:
 ## Key Features
 
 - **Zero config endpoints** — auto-parses any OpenAPI/Swagger spec and generates MCP tools
-- **Dual mode** — stdio for MCP clients, HTTP for server deployments
+- **Dual mode** — stdio or MCP Streamable HTTP, with HTTP health and inspection routes
 - **Flexible config** — CLI args, env vars, .env file, or Claude Desktop env block
 - **Multiple auth methods** — Bearer, API key, Basic, or none
 - **Production ready** — Docker, Kubernetes, AWS ECS, Google Cloud Run compatible

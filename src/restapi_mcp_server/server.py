@@ -10,7 +10,6 @@ import asyncio
 import logging
 from typing import Dict, List, Optional, Any
 from datetime import datetime, timezone
-from aiohttp import web
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
@@ -398,7 +397,8 @@ class RestApiMCPServer:
                 self.schema_manager.base_url,
                 self.schema_manager.auth_config
             )
-            result = client.execute_request(
+            result = await asyncio.to_thread(
+                client.execute_request,
                 method=method,
                 path=final_path,
                 query_params=query_params,
@@ -520,7 +520,8 @@ class RestApiMCPServer:
                 self.schema_manager.base_url,
                 self.schema_manager.auth_config
             )
-            result = client.execute_request(
+            result = await asyncio.to_thread(
+                client.execute_request,
                 method=method.lower(),
                 path=path,
                 query_params=query_params,
@@ -632,17 +633,16 @@ class RestApiMCPServer:
                 }
             }
     
-    async def setup_http_server(self):
-        """Setup optional HTTP server for health checks and metrics"""
-        if not self.enable_http:
-            return
-        
-        self.app = web.Application()
-        
+    def create_http_app(self):
+        """Build the MCP Streamable HTTP app and optional diagnostic routes."""
+        from starlette.responses import JSONResponse
+        from starlette.routing import Route
+        from restapi_mcp_server.http_transport import create_http_app
+
         # Health check endpoint
         async def health_handler(request):
             health_data = self._handle_health_check({})
-            return web.json_response(health_data)
+            return JSONResponse(health_data)
         
         # Metrics endpoint
         async def metrics_handler(request):
@@ -656,12 +656,12 @@ class RestApiMCPServer:
                 "ready": self.ready,
                 "timestamp": datetime.now(timezone.utc).isoformat()
             }
-            return web.json_response(metrics)
+            return JSONResponse(metrics)
         
         # Schema info endpoint
         async def schema_handler(request):
             schema_info = self._handle_schema_info({})
-            return web.json_response(schema_info)
+            return JSONResponse(schema_info)
         
         # Tools list endpoint
         async def tools_handler(request):
@@ -669,11 +669,11 @@ class RestApiMCPServer:
                 {
                     "name": tool["name"],
                     "description": tool["description"],
-                    "type": "endpoint" if not tool["name"].startswith(('list_', 'get_', 'execute_', 'health_')) else "utility"
+                    "type": "endpoint" if self._find_endpoint_from_tool(tool["name"]) else "utility"
                 }
                 for tool in self.tools.values()
             ]
-            return web.json_response({
+            return JSONResponse({
                 "tools": tools_list,
                 "total_count": len(tools_list)
             })
@@ -681,7 +681,7 @@ class RestApiMCPServer:
         # Endpoints list
         async def endpoints_handler(request):
             endpoints = self.schema_manager.get_all_endpoints()
-            return web.json_response({
+            return JSONResponse({
                 "endpoints": [
                     {
                         "method": e['method'].upper(),
@@ -695,12 +695,13 @@ class RestApiMCPServer:
         
         # Root endpoint
         async def root_handler(request):
-            return web.json_response({
+            return JSONResponse({
                 "server": "restapi-mcp-server",
                 "version": "1.0.0",
                 "status": "running",
-                "mode": "stdio",
+                "mode": self.mode,
                 "endpoints": {
+                    "mcp": "/mcp",
                     "health": "/health",
                     "metrics": "/metrics",
                     "schema": "/schema",
@@ -709,43 +710,41 @@ class RestApiMCPServer:
                 }
             })
         
-        # Register routes
-        self.app.router.add_get('/', root_handler)
-        self.app.router.add_get('/health', health_handler)
-        self.app.router.add_get('/metrics', metrics_handler)
-        self.app.router.add_get('/schema', schema_handler)
-        self.app.router.add_get('/tools', tools_handler)
-        self.app.router.add_get('/api/endpoints', endpoints_handler)
-        
-        # Start HTTP server
-        self.runner = web.AppRunner(self.app)
-        await self.runner.setup()
-        site = web.TCPSite(self.runner, self.host, self.port)
-        await site.start()
-        
-        logger.info("="*60)
-        logger.info(f"✓ HTTP Server started on http://{self.host}:{self.port}")
-        logger.info(f"  - Health: http://{self.host}:{self.port}/health")
-        logger.info(f"  - Metrics: http://{self.host}:{self.port}/metrics")
-        logger.info(f"  - Schema: http://{self.host}:{self.port}/schema")
-        logger.info(f"  - Tools: http://{self.host}:{self.port}/tools")
-        logger.info(f"  - Endpoints: http://{self.host}:{self.port}/api/endpoints")
-        logger.info("="*60)
-    
+        routes = []
+        if self.enable_http:
+            routes = [
+                Route('/', root_handler),
+                Route('/health', health_handler),
+                Route('/metrics', metrics_handler),
+                Route('/schema', schema_handler),
+                Route('/tools', tools_handler),
+                Route('/api/endpoints', endpoints_handler),
+            ]
+        return create_http_app(self, routes)
+
+    async def setup_http_server(self):
+        """Serve MCP and diagnostics on the same HTTP port until shutdown."""
+        import uvicorn
+
+        self.app = self.create_http_app()
+        config = uvicorn.Config(self.app, host=self.host, port=self.port)
+        logger.info("MCP Streamable HTTP endpoint: http://%s:%s/mcp", self.host, self.port)
+        await uvicorn.Server(config).serve()
+
     async def run(self):
         """Main MCP server loop"""
         logger.info("Starting REST API MCP Server...")
 
         # Initialize schema
         logger.info("Initializing server and loading schema...")
-        await self.initialize()
+        if not await self.initialize():
+            raise RuntimeError("Server initialization failed; check API and specification configuration")
 
         self._start_time = asyncio.get_event_loop().time()
 
         if self.mode == "http":
             logger.info("Running in HTTP mode (Docker/K8s)...")
             await self.setup_http_server()
-            await asyncio.Event().wait()  # keep alive
 
         elif self.mode == "stdio":
             logger.info("Running in MCP stdio mode...")
@@ -819,26 +818,8 @@ class RestApiMCPServer:
 
 
 async def start_http_server(server: RestApiMCPServer):
-    """Start aiohttp HTTP server if enabled"""
-    if not server.enable_http:
-        logger.info("HTTP endpoint disabled")
-        return
-
-    app = web.Application()
-
-    # Health endpoint
-    async def health(request):
-        return web.json_response({"status": "ok", "server": "restapi-mcp-server"})
-
-    app.router.add_get("/health", health)
-
-    server.app = app
-    server.runner = web.AppRunner(app)
-    await server.runner.setup()
-    site = web.TCPSite(server.runner, host=server.host, port=server.port)
-
-    logger.info(f"Starting HTTP server on http://{server.host}:{server.port}")
-    await site.start()
+    """Start the same Streamable HTTP server used by the CLI."""
+    await server.setup_http_server()
 
 
 async def start_mcp_listener(server: RestApiMCPServer):
@@ -877,16 +858,7 @@ async def start_mcp_listener(server: RestApiMCPServer):
 
 async def main():
     server = RestApiMCPServer()
-    await server.initialize()
-
-    # Start HTTP server (forever)
-    asyncio.create_task(start_http_server(server))
-
-    # Start MCP listener (optional)
-    asyncio.create_task(start_mcp_listener(server))
-
-    # Keep container alive
-    await asyncio.Event().wait()
+    await server.run()
 
 
 if __name__ == "__main__":
