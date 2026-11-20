@@ -7,10 +7,29 @@ import logging
 import requests
 import time
 from typing import Dict, Optional, Any
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlsplit
 import base64
 
 logger = logging.getLogger(__name__)
+
+
+class DocboxRedirectError(ValueError):
+    """The API tried to redirect a request carrying server-owned credentials."""
+
+
+def docbox_cloud_headers(auth_config: Dict) -> Dict[str, str]:
+    """Validate fixed server-owned credentials without exposing their values."""
+    headers = {'API-Key': auth_config.get('value'), 'Cloud-ID': auth_config.get('cloud_id')}
+    for name, value in headers.items():
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError('DOCBOX Cloud requires API_KEY_VALUE and CLOUD_ID in server configuration')
+        try:
+            requests.utils.check_header_validity((name, value))
+            value.encode('latin-1')
+        except (requests.exceptions.InvalidHeader, UnicodeError):
+            raise ValueError('Invalid DOCBOX Cloud authentication header in server configuration') from None
+    return headers
+
 
 class RestClient:
     """REST client with authentication and error handling"""
@@ -31,7 +50,14 @@ class RestClient:
         """Configure authentication for the session"""
         auth_type = self.auth_config.get('type', 'none')
         
-        if auth_type == 'bearer':
+        if auth_type == 'docbox_cloud':
+            self.session.headers.update(docbox_cloud_headers(self.auth_config))
+            target = urlsplit(self.base_url)
+            if (target.scheme != 'https' or not target.hostname or target.username
+                    or target.password or target.query or target.fragment):
+                raise ValueError('DOCBOX Cloud requires an HTTPS base URL without credentials, query or fragment')
+
+        elif auth_type == 'bearer':
             token = self.auth_config.get('token')
             if token:
                 self.session.headers['Authorization'] = f'Bearer {token}'
@@ -82,6 +108,17 @@ class RestClient:
             # Remove leading slash if present
             path = path.lstrip('/')
             url = f"{self.base_url}/{path}"
+
+        cloud_auth = self.auth_config.get('type') == 'docbox_cloud'
+        if cloud_auth:
+            base, target = urlsplit(self.base_url), urlsplit(url)
+            if (target.scheme, target.hostname, target.port or 443) != (base.scheme, base.hostname, base.port or 443):
+                raise ValueError('DOCBOX Cloud requests must use the configured HTTPS origin')
+            if target.username or target.password or target.fragment:
+                raise ValueError('DOCBOX Cloud request URLs cannot contain credentials or fragments')
+            if any(name.lower() in {'api-key', 'cloud-id', 'host', 'authorization', 'proxy-authorization', 'cookie'}
+                   for name in (headers or {})):
+                raise ValueError('DOCBOX Cloud authentication and routing headers are server-owned')
         
         # Prepare headers
         request_headers = self.session.headers.copy()
@@ -104,8 +141,12 @@ class RestClient:
                 params=query_params,
                 json=body,
                 headers=request_headers,
-                timeout=timeout
+                timeout=timeout,
+                allow_redirects=not cloud_auth,
             )
+
+            if cloud_auth and 300 <= response.status_code < 400:
+                raise DocboxRedirectError('DOCBOX Cloud redirect refused; configure the canonical HTTPS base URL')
             
             elapsed_time = time.time() - start_time
             logger.info(f"Request completed in {elapsed_time:.2f}s with status {response.status_code}")
@@ -124,15 +165,25 @@ class RestClient:
                     'headers': dict(response.headers)
                 }
             
+        except DocboxRedirectError:
+            logger.error('DOCBOX Cloud redirect refused')
+            raise
+
         except requests.exceptions.Timeout:
             logger.error(f"Request timeout after {timeout}s")
             raise Exception(f"Request timeout after {timeout} seconds")
         
         except requests.exceptions.ConnectionError as e:
+            if cloud_auth:
+                logger.error('DOCBOX Cloud connection or TLS error')
+                raise Exception('DOCBOX Cloud connection or TLS error') from None
             logger.error(f"Connection error: {e}")
             raise Exception(f"Connection error: {str(e)}")
         
         except requests.exceptions.HTTPError as e:
+            if cloud_auth:
+                logger.error('DOCBOX Cloud returned HTTP %s', e.response.status_code)
+                raise Exception(f'DOCBOX Cloud returned HTTP {e.response.status_code}') from None
             logger.error(f"HTTP error: {e}")
             
             # Try to get error details from response
@@ -146,10 +197,16 @@ class RestClient:
             raise Exception(f"HTTP {e.response.status_code}: {str(e)}{error_detail}")
         
         except requests.exceptions.RequestException as e:
+            if cloud_auth:
+                logger.error('DOCBOX Cloud request failed')
+                raise Exception('DOCBOX Cloud request failed') from None
             logger.error(f"Request failed: {e}")
             raise Exception(f"Request failed: {str(e)}")
         
         except Exception as e:
+            if cloud_auth:
+                logger.error('DOCBOX Cloud request failed')
+                raise Exception('DOCBOX Cloud request failed') from None
             logger.error(f"Unexpected error: {e}", exc_info=True)
             raise Exception(f"Unexpected error: {str(e)}")
     

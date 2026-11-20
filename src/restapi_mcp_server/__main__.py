@@ -54,7 +54,7 @@ Examples:
     )
     parser.add_argument(
         "--auth-type",
-        choices=["bearer", "apikey", "basic", "none"],
+        choices=["bearer", "apikey", "docbox_cloud", "basic", "none"],
         default=None,
         help="Authentication type (overrides AUTH_TYPE env var)"
     )

@@ -48,7 +48,7 @@ All available flags:
 --base-url URL       REST API base URL (required if not set via env)
 --spec-url URL       OpenAPI/Swagger spec URL or local file path (required if not set via env)
 --token TOKEN        API access token for bearer authentication
---auth-type TYPE     Authentication type: bearer, apikey, basic, none (default: bearer)
+--auth-type TYPE     Authentication type: bearer, apikey, docbox_cloud, basic, none (default: bearer)
 --mode stdio|http    Server mode (default: stdio)
 --port PORT          HTTP port, only used in http mode (default: 8080)
 --host HOST          HTTP host, only used in http mode (default: 0.0.0.0)
@@ -118,10 +118,11 @@ Claude Desktop injects the `env` block values directly into the process — this
 |----------|----------|---------|-------------|
 | `REST_API_BASE_URL` | Yes | — | REST API base URL |
 | `OPENAPI_SPEC_URL` | Yes | — | OpenAPI/Swagger spec URL or local file path |
-| `AUTH_TYPE` | No | `bearer` | Auth method: `bearer`, `apikey`, `basic`, `none` |
+| `AUTH_TYPE` | No | `bearer` | Auth method: `bearer`, `apikey`, `docbox_cloud`, `basic`, `none` |
 | `API_ACCESS_TOKEN` | No | — | Bearer token for auth |
 | `API_KEY_HEADER` | No | `X-API-Key` | Header name for API key auth |
 | `API_KEY_VALUE` | No | — | API key value |
+| `CLOUD_ID` | For DOCBOX Cloud | — | Server-owned `Cloud-ID` header; never pass it as a tool argument |
 | `BASIC_AUTH_USERNAME` | No | — | Username for basic auth |
 | `BASIC_AUTH_PASSWORD` | No | — | Password for basic auth |
 | `MCP_MODE` | No | `stdio` | `stdio` or `http` |
@@ -202,6 +203,25 @@ AUTH_TYPE=apikey
 API_KEY_HEADER=X-API-Key
 API_KEY_VALUE=your_key
 ```
+
+### DOCBOX Cloud
+
+```env
+REST_API_BASE_URL=https://cloud.docbox.eu:8081/api/v2
+AUTH_TYPE=docbox_cloud
+API_KEY_VALUE=
+CLOUD_ID=
+```
+
+Set both values locally. The server injects `API-Key` and `Cloud-ID`; they are not
+MCP tool arguments. Missing or invalid values report `not_ready` / `auth_configured=false`
+and block API calls. For compatibility, `AUTH_TYPE=apikey` with a nonempty `CLOUD_ID`
+also selects this protected Cloud mode. Inhouse API-key auth without `CLOUD_ID` is unchanged.
+
+Cloud mode requires HTTPS, rejects authentication/routing-header overrides and foreign
+origins, and refuses redirects. TLS verification stays enabled. Health only confirms
+schema/configuration readiness, not valid credentials or a successful provider login.
+Form/multipart requests and binary document downloads still need separate support.
 
 ### Basic Authentication
 
