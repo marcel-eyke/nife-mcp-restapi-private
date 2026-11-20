@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 # Import schema manager and REST client
 from restapi_mcp_server.schema_manager import SchemaManager
-from restapi_mcp_server.rest_client import RestClient
+from restapi_mcp_server.rest_client import RestClient, docbox_cloud_headers
 
 class RestApiMCPServer:
     """
@@ -105,7 +105,17 @@ class RestApiMCPServer:
         """Get authentication configuration"""
         auth_type = auth_type.lower()
         
-        if auth_type == 'bearer':
+        if auth_type == 'docbox_cloud' or (auth_type == 'apikey' and os.environ.get('CLOUD_ID')):
+            config = {'type': 'docbox_cloud', 'value': os.environ.get('API_KEY_VALUE'),
+                      'cloud_id': os.environ.get('CLOUD_ID')}
+            try:
+                docbox_cloud_headers(config)
+                logger.info('DOCBOX Cloud authentication configured (API-Key and Cloud-ID)')
+            except ValueError:
+                logger.warning('DOCBOX Cloud requires valid API_KEY_VALUE and CLOUD_ID in server configuration')
+            return config
+
+        elif auth_type == 'bearer':
             token = os.environ.get('API_ACCESS_TOKEN')
             if token:
                 logger.info("✓ Bearer token authentication configured")
@@ -545,8 +555,15 @@ class RestApiMCPServer:
     
     def _handle_health_check(self, args: dict) -> dict:
         """Health check"""
+        auth_configured = True
+        if self.schema_manager.auth_config.get('type') == 'docbox_cloud':
+            try:
+                docbox_cloud_headers(self.schema_manager.auth_config)
+            except ValueError:
+                auth_configured = False
         return {
-            "status": "healthy" if self.ready else "not_ready",
+            "status": "healthy" if self.ready and auth_configured else "not_ready",
+            "auth_configured": auth_configured,
             "server": "restapi-mcp-server",
             "version": "1.0.0",
             "schema_loaded": self.schema_manager.schema_loaded,
