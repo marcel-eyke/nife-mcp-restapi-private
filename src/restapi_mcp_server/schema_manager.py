@@ -167,13 +167,18 @@ class SchemaManager:
                     request_body = operation['requestBody']
                     content = request_body.get('content', {})
                     
-                    # Get JSON schema if available
-                    json_content = content.get('application/json', {})
-                    schema = json_content.get('schema', {})
+                    media_type = 'application/json'
+                    form_media_type = 'application/x-www-form-urlencoded'
+                    if media_type not in content and form_media_type in content:
+                        media_type = form_media_type
+                    schema = content.get(media_type, {}).get('schema', {})
+                    if media_type == form_media_type and '$ref' in schema:
+                        schema = self._resolve_ref(schema['$ref'])
                     
                     endpoint['request_body'] = {
                         'description': request_body.get('description', ''),
                         'required': request_body.get('required', False),
+                        'media_type': media_type,
                         'schema': schema
                     }
                 

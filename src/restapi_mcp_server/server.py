@@ -180,12 +180,15 @@ class RestApiMCPServer:
                     required.append(param['name'])
             
             # Request body
-            if endpoint.get('request_body'):
+            request_body = endpoint.get('request_body')
+            if request_body:
                 properties['body'] = {
                     'type': 'object',
-                    'description': 'Request body data'
+                    'description': 'Request body data',
                 }
-                if endpoint['request_body'].get('required', False):
+                if request_body.get('media_type') == 'application/x-www-form-urlencoded':
+                    properties['body'].update(request_body['schema'])
+                if request_body.get('required', False):
                     required.append('body')
             
             self.tools[tool_name] = {
@@ -399,6 +402,10 @@ class RestApiMCPServer:
             
             # Extract body
             body = args.get('body')
+            request_options = {}
+            request_body = endpoint_info.get('request_body') or {}
+            if body is not None and request_body.get('media_type') == 'application/x-www-form-urlencoded':
+                request_options['headers'] = {'Content-Type': request_body['media_type']}
             
             logger.info(f"Executing {method.upper()} {final_path}")
             
@@ -412,7 +419,8 @@ class RestApiMCPServer:
                 method=method,
                 path=final_path,
                 query_params=query_params,
-                body=body
+                body=body,
+                **request_options,
             )
             
             return {

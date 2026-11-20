@@ -128,6 +128,8 @@ class RestClient:
         # Add content-type for body requests
         if body and 'Content-Type' not in request_headers:
             request_headers['Content-Type'] = 'application/json'
+        media_type = request_headers.get('Content-Type', '').split(';', 1)[0].strip().lower()
+        body_argument = 'data' if media_type == 'application/x-www-form-urlencoded' else 'json'
         
         start_time = time.time()
         
@@ -139,10 +141,10 @@ class RestClient:
                 method=method,
                 url=url,
                 params=query_params,
-                json=body,
                 headers=request_headers,
                 timeout=timeout,
                 allow_redirects=not cloud_auth,
+                **{body_argument: body},
             )
 
             if cloud_auth and 300 <= response.status_code < 400:

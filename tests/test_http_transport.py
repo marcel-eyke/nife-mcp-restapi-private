@@ -7,6 +7,7 @@ import subprocess
 import sys
 
 import pytest
+import requests
 from starlette.testclient import TestClient
 
 from restapi_mcp_server.server import RestApiMCPServer
@@ -23,6 +24,20 @@ def server(tmp_path, monkeypatch):
             "parameters": [{"name": "id", "in": "path", "required": True,
                             "schema": {"type": "integer"}}],
             "responses": {"200": {"description": "OK"}},
+        }}, "/document/{id}/rename": {"post": {
+            "parameters": [{"name": "id", "in": "path", "required": True,
+                            "schema": {"type": "integer"}}],
+            "requestBody": {"required": True, "content": {
+                "application/x-www-form-urlencoded": {
+                    "schema": {"$ref": "#/components/schemas/Rename"},
+                },
+            }},
+            "responses": {"200": {"description": "OK"}},
+        }}},
+        "components": {"schemas": {"Rename": {
+            "type": "object",
+            "properties": {"new-name": {"type": "string"}},
+            "required": ["new-name"],
         }}},
     }))
     monkeypatch.setenv("OPENAPI_SPEC_URL", str(spec))
@@ -111,6 +126,39 @@ def test_tool_failure_is_reported(server, monkeypatch):
         result = response.json()["result"]
         assert result["isError"] is True
         assert "upstream unavailable" in result["content"][0]["text"]
+
+
+def test_rename_tool_sends_urlencoded_form(server, monkeypatch):
+    sent = []
+
+    def send(self, request, **kwargs):
+        sent.append(request)
+        response = requests.Response()
+        response.status_code = 200
+        response._content = b'{}'
+        return response
+
+    monkeypatch.setattr(requests.Session, "send", send)
+    with TestClient(server.create_http_app(), base_url="http://localhost") as client:
+        headers = initialize(client)
+        listing = client.post("/mcp", headers=headers, json={
+            "jsonrpc": "2.0", "id": 2, "method": "tools/list",
+        }).json()["result"]["tools"]
+        tool = next(tool for tool in listing if tool["name"] == "post_document_rename_by_id")
+        assert tool["inputSchema"]["properties"]["body"]["required"] == ["new-name"]
+        result = client.post("/mcp", headers=headers, json={
+            "jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {
+                "name": tool["name"],
+                "arguments": {"id": 7, "body": {"new-name": "März & 20%.pdf"}},
+            },
+        }).json()["result"]
+
+    assert not result["isError"]
+    request, = sent
+    assert request.method == "POST"
+    assert request.url == "http://api.invalid/document/7/rename"
+    assert request.headers["Content-Type"] == "application/x-www-form-urlencoded"
+    assert request.body == "new-name=M%C3%A4rz+%26+20%25.pdf"
 
 
 def test_diagnostics_and_transport_validation(server):
